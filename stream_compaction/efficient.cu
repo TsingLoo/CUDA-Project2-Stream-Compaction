@@ -113,7 +113,6 @@ namespace StreamCompaction {
          * @returns      The number of elements remaining after compaction.
          */
         int compact(int n, int *odata, const int *idata) {
-            timer().startGpuTimer();
 
             dim3 fullBlocksPerGrid((n + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
@@ -129,6 +128,7 @@ namespace StreamCompaction {
             cudaMemcpy(dev_idata, idata, n * sizeof(int), cudaMemcpyHostToDevice);
 
             //compute the temporary array
+            timer().startGpuTimer();
             StreamCompaction::Common::kernMapToBoolean << <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_flags, dev_idata);
 
 			//compute the scan of the temporary array
@@ -144,7 +144,7 @@ namespace StreamCompaction {
             int totalCount = lastElementOfScan + lastElementOfFlags;
             cudaMalloc((void**)&dev_odata, totalCount * sizeof(int));
             StreamCompaction::Common::kernScatter << <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_odata, dev_idata, dev_flags, dev_scanResult);
-            
+            timer().endGpuTimer();
             cudaMemcpy(odata, dev_odata, totalCount * sizeof(int), cudaMemcpyDeviceToHost);
 
             cudaFree(dev_idata);
@@ -152,8 +152,6 @@ namespace StreamCompaction {
             cudaFree(dev_idata);
             cudaFree(dev_odata);
 
-
-            timer().endGpuTimer();
             return totalCount;
         }
     }
