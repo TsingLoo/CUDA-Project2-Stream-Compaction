@@ -28,6 +28,22 @@ namespace StreamCompaction {
             idata[k] += idata[k - halfStride];
         }
 
+        __global__ void kernUpSweep(int n, int d, int* data) {
+            // k is the ID of the k-th active thread (dense)
+            int k = blockIdx.x * blockDim.x + threadIdx.x;
+
+            int fullStride = 1 << (d + 1);
+            int halfStride = 1 << d;
+
+            int global_idx = (k + 1) * fullStride - 1;
+
+            if (global_idx >= n) {
+                return;
+            }
+
+            data[global_idx] += data[global_idx - halfStride];
+        }
+
         __global__ void setLastElementToZero(int paddedN, int* idata)
         {
             idata[paddedN - 1] = 0;
@@ -50,6 +66,26 @@ namespace StreamCompaction {
 			idata[k - halfStride] = parentValue ;
 			idata[k] = parentValue + originalLeftChildValue;
         }
+
+        __global__ void kernDownSweep(int n, int d, int* data) {
+            int k = blockIdx.x * blockDim.x + threadIdx.x;
+
+            int fullStride = 1 << (d + 1);
+            int halfStride = 1 << d;
+
+            int global_idx = (k + 1) * fullStride - 1;
+
+            if (global_idx >= n) {
+                return;
+            }
+
+            // Standard down-sweep logic using the calculated global index
+            int originalLeftChildValue = data[global_idx - halfStride];
+            int parentValue = data[global_idx];
+
+            data[global_idx - halfStride] = parentValue;
+            data[global_idx] = parentValue + originalLeftChildValue;
+        }
         
         void scan_device(int n, int* dev_odata, const int* dev_idata) {
             int paddedN = 1 << ilog2ceil(n);
@@ -60,16 +96,36 @@ namespace StreamCompaction {
             cudaMemset(dev_temp, 0, paddedN * sizeof(int));
             cudaMemcpy(dev_temp, dev_idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
 
-            // Up-Sweep
+            //// Up-Sweep
+            //for (int d = 0; d < ilog2ceil(n); d++) {
+            //    kernWorkEfficientUpSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
+            //}
+
+            //setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
+
+            //// Down-Sweep
+            //for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+            //    kernWorkEfficientDownSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
+            //}
+
+
             for (int d = 0; d < ilog2ceil(n); d++) {
-                kernWorkEfficientUpSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
+                // Calculate how many threads are actually needed for this pass
+                int numActiveThreads = paddedN / (1 << (d + 1));
+                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                dim3 blockDim(BLOCK_SIZE);
+
+                kernUpSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
             }
 
             setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
 
-            // Down-Sweep
             for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
-                kernWorkEfficientDownSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
+                int numActiveThreads = paddedN / (1 << (d + 1));
+                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                dim3 blockDim(BLOCK_SIZE);
+
+                kernDownSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
             }
 
             cudaMemcpy(dev_odata, dev_temp, n * sizeof(int), cudaMemcpyDeviceToDevice);
