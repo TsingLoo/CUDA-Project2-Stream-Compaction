@@ -12,6 +12,15 @@ namespace StreamCompaction {
             return timer;
         }
 
+        void scanWithoutTimer(int n, int* odata, const int* idata) {
+            int sum = 0;
+            for (int i = 0; i < n; ++i)
+            {
+                odata[i] = sum;
+                sum += idata[i];
+            }
+        }
+
         /**
          * CPU scan (prefix sum).
          * For performance analysis, this is supposed to be a simple for loop.
@@ -20,6 +29,9 @@ namespace StreamCompaction {
         void scan(int n, int *odata, const int *idata) {
             timer().startCpuTimer();
             // TODO
+
+            scanWithoutTimer(n, odata, idata);
+
             timer().endCpuTimer();
         }
 
@@ -31,8 +43,20 @@ namespace StreamCompaction {
         int compactWithoutScan(int n, int *odata, const int *idata) {
             timer().startCpuTimer();
             // TODO
+            int count = 0;
+            int curr = 0;
+            for (int i = 0; i < n; ++i)
+            {
+                curr = idata[i];
+
+                if (curr != 0) {
+                    odata[count] = curr;
+                    count++;
+                }
+            }
+
             timer().endCpuTimer();
-            return -1;
+            return count;
         }
 
         /**
@@ -43,8 +67,34 @@ namespace StreamCompaction {
         int compactWithScan(int n, int *odata, const int *idata) {
             timer().startCpuTimer();
             // TODO
+
+            int* tempArray = new int[n];
+
+            for (int i = 0; i < n; ++i)
+            {
+                tempArray[i] = (idata[i] != 0) ? 1 : 0;
+            }
+
+            int* scanResult = new int[n];
+            scanWithoutTimer(n, scanResult, tempArray);
+
+            //Scatter
+            int finalLength = scanResult[n - 1];
+
+            for (int i = 0; i < n; ++i)
+            {
+                if (tempArray[i] == 1) {
+                    odata[scanResult[i]] = idata[i];
+                }
+            }
+
+
+            delete[] tempArray;
+            delete[] scanResult;
+
+
             timer().endCpuTimer();
-            return -1;
+            return finalLength;
         }
     }
 }
