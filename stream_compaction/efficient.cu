@@ -103,33 +103,6 @@ namespace StreamCompaction {
             timer().endGpuTimer();
         }
 
-        __global__ void kernComputeCompactFlag(int n, int *odata, const int* idata) 
-        {
-            int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        
-            if (idx >= n) {
-                return;
-            }
-
-            if (idata[idx] != 0) {
-                odata[idx] = 1;
-            }
-            else {
-                odata[idx] = 0;
-			}
-        }
-
-        __global__ void kernCompactScatter(int n, int* odata, const int* dev_idata, const int* flags, const int* scanResult)
-        {
-            int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-            if (idx >= n || flags[idx] == 0) {
-                return;
-            }
-
-			odata[scanResult[idx]] = dev_idata[idx];
-        }
-
         /**
          * Performs stream compaction on idata, storing the result into odata.
          * All zeroes are discarded.
@@ -156,7 +129,7 @@ namespace StreamCompaction {
             cudaMemcpy(dev_idata, idata, n * sizeof(int), cudaMemcpyHostToDevice);
 
             //compute the temporary array
-			kernComputeCompactFlag<< <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_flags, dev_idata);
+            StreamCompaction::Common::kernMapToBoolean << <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_flags, dev_idata);
 
 			//compute the scan of the temporary array
             scan_device(n, dev_scanResult, dev_flags);
@@ -170,7 +143,7 @@ namespace StreamCompaction {
 
             int totalCount = lastElementOfScan + lastElementOfFlags;
             cudaMalloc((void**)&dev_odata, totalCount * sizeof(int));
-            kernCompactScatter<< <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_odata, dev_idata, dev_flags, dev_scanResult);
+            StreamCompaction::Common::kernScatter << <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_odata, dev_idata, dev_flags, dev_scanResult);
             
             cudaMemcpy(odata, dev_odata, totalCount * sizeof(int), cudaMemcpyDeviceToHost);
 
