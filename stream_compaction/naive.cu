@@ -56,6 +56,9 @@ namespace StreamCompaction {
 
             cudaMemcpy(odata + 1, dev_A, (n - 1) * sizeof(int), cudaMemcpyDefault);
 
+			cudaFree(dev_A);
+			cudaFree(dev_B);
+
             timer().endGpuTimer();
         }
     }
