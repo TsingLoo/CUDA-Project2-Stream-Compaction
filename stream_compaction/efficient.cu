@@ -3,7 +3,7 @@
 #include "common.h"
 #include "efficient.h"
 
-#define BLOCK_SIZE 128
+#define BLOCK_SIZE 256
 
 namespace StreamCompaction {
     namespace Efficient {
@@ -154,9 +154,53 @@ namespace StreamCompaction {
          * Performs prefix-sum (aka scan) on idata, storing the result into odata.
          */
         void scan(int n, int *odata, const int *idata) {
+            int paddedN = 1 << ilog2ceil(n);
+            dim3 fullBlocksPerGrid((paddedN + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+            int* dev_temp; // Use a temporary buffer for the in-place algorithm
+            cudaMalloc((void**)&dev_temp, paddedN * sizeof(int));
+            cudaMemset(dev_temp, 0, paddedN * sizeof(int));
+            cudaMemcpy(dev_temp, idata, n * sizeof(int), cudaMemcpyHostToDevice);
+
             timer().startGpuTimer();
-            scanWithoutTimer(n, odata, idata);
+            //// Up-Sweep
+            //for (int d = 0; d < ilog2ceil(n); d++) {
+            //    kernWorkEfficientUpSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
+            //}
+
+            //setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
+
+            //// Down-Sweep
+            //for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+            //    kernWorkEfficientDownSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
+            //}
+
+            for (int d = 0; d < ilog2ceil(n); d++) {
+                // Calculate how many threads are actually needed for this pass
+                int numActiveThreads = paddedN / (1 << (d + 1));
+                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                dim3 blockDim(BLOCK_SIZE);
+
+                kernUpSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
+                //cudaDeviceSynchronize();
+            }
+
+            setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
+
+            for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+                int numActiveThreads = paddedN / (1 << (d + 1));
+                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                dim3 blockDim(BLOCK_SIZE);
+
+                kernDownSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
+                //cudaDeviceSynchronize();
+            }
+
             timer().endGpuTimer();
+
+            cudaMemcpy(odata, dev_temp, n * sizeof(int), cudaMemcpyDeviceToHost);
+
+            cudaFree(dev_temp);
         }
 
         /**
@@ -205,7 +249,7 @@ namespace StreamCompaction {
 
             cudaFree(dev_idata);
             cudaFree(dev_flags);
-            cudaFree(dev_idata);
+            cudaFree(dev_scanResult);
             cudaFree(dev_odata);
 
             return totalCount;
