@@ -130,46 +130,49 @@ namespace StreamCompaction {
         /// <param name="dev_odata">be sure that the length of this should be n</param>
         /// <param name="dev_idata">be sure that the length of this should be n</param>
         void scan_device(int n, int* dev_odata, const int* dev_idata) {
+            // Calculate the padded size, which is the next power of 2.
             int paddedN = 1 << ilog2ceil(n);
 
-            int* dev_temp;
+            // STEP 1: No more cudaMalloc or dev_temp!
 
-            cudaMalloc((void**)&dev_temp, paddedN * sizeof(int));
-            cudaMemset(dev_temp, 0, paddedN * sizeof(int));
-            cudaMemcpy(dev_temp, dev_idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
+            // STEP 2: Copy input directly to the output buffer.
+            // Then, pad the rest of the output buffer with zeros.
+            cudaMemcpy(dev_odata, dev_idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
+            if (paddedN > n) {
+                cudaMemset(dev_odata + n, 0, (paddedN - n) * sizeof(int));
+            }
 
-
+            // --- Up-Sweep Phase ---
             for (int d = 0; d < ilog2ceil(paddedN); d++) {
-                // Calculate how many threads are actually needed for this pass
                 int numActiveThreads = paddedN / (1 << (d + 1));
                 int blockSize = std::min(BLOCK_SIZE, numActiveThreads);
-
 
                 dim3 gridDim((numActiveThreads + blockSize - 1) / blockSize);
                 dim3 blockDim(blockSize);
 
-                kernUpSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
-
+                // STEP 3: Kernels now operate directly on dev_odata.
+                kernUpSweep << <gridDim, blockDim >> > (paddedN, d, dev_odata);
                 cudaDeviceSynchronize();
             }
 
-            setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
+            // Set the last element to zero for an exclusive scan.
+            setLastElementToZero << <1, 1 >> > (paddedN, dev_odata);
 
+            // --- Down-Sweep Phase ---
             for (int d = ilog2ceil(paddedN) - 1; d >= 0; d--) {
                 int numActiveThreads = paddedN / (1 << (d + 1));
                 int blockSize = std::min(BLOCK_SIZE, numActiveThreads);
 
-
                 dim3 gridDim((numActiveThreads + blockSize - 1) / blockSize);
                 dim3 blockDim(blockSize);
 
-                kernDownSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
-
+                // STEP 3 (cont.): Kernels now operate directly on dev_odata.
+                kernDownSweep << <gridDim, blockDim >> > (paddedN, d, dev_odata);
                 cudaDeviceSynchronize();
             }
 
-            cudaMemcpy(dev_odata, dev_temp, n * sizeof(int), cudaMemcpyDeviceToDevice);
-            cudaFree(dev_temp);
+            // STEP 4: The final cudaMemcpy and cudaFree are no longer needed.
+            // The result is already in dev_odata.
         }
 
         void scanWithoutTimer(int n, int* odata, const int* idata) {
