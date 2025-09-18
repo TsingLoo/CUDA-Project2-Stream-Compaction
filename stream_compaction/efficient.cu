@@ -28,22 +28,6 @@ namespace StreamCompaction {
             idata[k] += idata[k - halfStride];
         }
 
-        __global__ void kernUpSweep(int n, int d, int* data) {
-            // k is the ID of the k-th active thread (dense)
-            int k = blockIdx.x * blockDim.x + threadIdx.x;
-
-            int fullStride = 1 << (d + 1);
-            int halfStride = 1 << d;
-
-            int global_idx = (k + 1) * fullStride - 1;
-
-            if (global_idx >= n) {
-                return;
-            }
-
-            data[global_idx] += data[global_idx - halfStride];
-        }
-
         __global__ void setLastElementToZero(int paddedN, int* idata)
         {
             idata[paddedN - 1] = 0;
@@ -60,11 +44,62 @@ namespace StreamCompaction {
             }
 
             // down-sweep
-			int originalLeftChildValue = idata[k - halfStride];
-			int parentValue = idata[k];
+            int originalLeftChildValue = idata[k - halfStride];
+            int parentValue = idata[k];
 
-			idata[k - halfStride] = parentValue ;
-			idata[k] = parentValue + originalLeftChildValue;
+            idata[k - halfStride] = parentValue;
+            idata[k] = parentValue + originalLeftChildValue;
+        }
+
+        __global__ void kernUpSweep(int n, int d, int* data) {
+            // k is the ID of the k-th active thread (dense)
+            int k = blockIdx.x * blockDim.x + threadIdx.x;
+
+            int fullStride = 1 << (d + 1);
+            int halfStride = 1 << d;
+
+            int global_idx = (k + 1) * fullStride - 1;
+
+            if (global_idx >= n) {
+                return;
+            }
+
+            data[global_idx] += data[global_idx - halfStride];
+        }
+
+        __global__ void kernUpSweep_DEBUG(int n, int d, int* data, int numActiveThreads) {
+            // k is the ID of the k-th active thread (dense)
+            int k = blockIdx.x * blockDim.x + threadIdx.x;
+
+            // This check is important: only let threads that are part of the
+            // compact grid do the printing.
+            if (k >= numActiveThreads) {
+                return;
+            }
+
+            int fullStride = 1 << (d + 1);
+            int halfStride = 1 << d;
+
+            int global_idx = (k + 1) * fullStride - 1;
+
+            // --- Let's print the state of the first and last active threads ---
+            if (d == 0 && (k == 0 || k == numActiveThreads - 1)) {
+                printf("d=%d, active_thread_k=%d, global_idx=%d, n=%d\n",
+                    d, k, global_idx, n);
+            }
+
+            if (global_idx >= n) {
+                return;
+            }
+
+            // Let's also check the values we are about to add
+            if (d == 0 && (k == 0 || k == numActiveThreads - 1)) {
+                int read_addr = global_idx - halfStride;
+                printf("  -> Thread %d will add data[%d] (value=%d) to data[%d] (value=%d)\n",
+                    k, read_addr, data[read_addr], global_idx, data[global_idx]);
+            }
+
+            data[global_idx] += data[global_idx - halfStride];
         }
 
         __global__ void kernDownSweep(int n, int d, int* data) {
@@ -83,53 +118,57 @@ namespace StreamCompaction {
             int originalLeftChildValue = data[global_idx - halfStride];
             int parentValue = data[global_idx];
 
+
             data[global_idx - halfStride] = parentValue;
             data[global_idx] = parentValue + originalLeftChildValue;
         }
-        
+
+        /// <summary>
+        /// return an excluisve scan
+        /// </summary>
+        /// <param name="n">is the actual number of elements</param>
+        /// <param name="dev_odata">be sure that the length of this should be n</param>
+        /// <param name="dev_idata">be sure that the length of this should be n</param>
         void scan_device(int n, int* dev_odata, const int* dev_idata) {
             int paddedN = 1 << ilog2ceil(n);
-            dim3 fullBlocksPerGrid((paddedN + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
-            int* dev_temp; // Use a temporary buffer for the in-place algorithm
+            int* dev_temp;
+
             cudaMalloc((void**)&dev_temp, paddedN * sizeof(int));
             cudaMemset(dev_temp, 0, paddedN * sizeof(int));
             cudaMemcpy(dev_temp, dev_idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
 
-            //// Up-Sweep
-            //for (int d = 0; d < ilog2ceil(n); d++) {
-            //    kernWorkEfficientUpSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
-            //}
 
-            //setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
-
-            //// Down-Sweep
-            //for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
-            //    kernWorkEfficientDownSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
-            //}
-
-
-            for (int d = 0; d < ilog2ceil(n); d++) {
+            for (int d = 0; d < ilog2ceil(paddedN); d++) {
                 // Calculate how many threads are actually needed for this pass
                 int numActiveThreads = paddedN / (1 << (d + 1));
-                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
-                dim3 blockDim(BLOCK_SIZE);
+                int blockSize = std::min(BLOCK_SIZE, numActiveThreads);
+
+
+                dim3 gridDim((numActiveThreads + blockSize - 1) / blockSize);
+                dim3 blockDim(blockSize);
 
                 kernUpSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
+
+                cudaDeviceSynchronize();
             }
 
             setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
 
-            for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+            for (int d = ilog2ceil(paddedN) - 1; d >= 0; d--) {
                 int numActiveThreads = paddedN / (1 << (d + 1));
-                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
-                dim3 blockDim(BLOCK_SIZE);
+                int blockSize = std::min(BLOCK_SIZE, numActiveThreads);
+
+
+                dim3 gridDim((numActiveThreads + blockSize - 1) / blockSize);
+                dim3 blockDim(blockSize);
 
                 kernDownSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
+
+                cudaDeviceSynchronize();
             }
 
             cudaMemcpy(dev_odata, dev_temp, n * sizeof(int), cudaMemcpyDeviceToDevice);
-
             cudaFree(dev_temp);
         }
 
@@ -155,52 +194,29 @@ namespace StreamCompaction {
          */
         void scan(int n, int *odata, const int *idata) {
             int paddedN = 1 << ilog2ceil(n);
+
+            //
+			int t = ilog2ceil(9);
+
             dim3 fullBlocksPerGrid((paddedN + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
             int* dev_temp; // Use a temporary buffer for the in-place algorithm
+            int* dev_odata;
             cudaMalloc((void**)&dev_temp, paddedN * sizeof(int));
+            cudaMalloc((void**)&dev_odata, paddedN * sizeof(int));
             cudaMemset(dev_temp, 0, paddedN * sizeof(int));
             cudaMemcpy(dev_temp, idata, n * sizeof(int), cudaMemcpyHostToDevice);
 
             timer().startGpuTimer();
-            //// Up-Sweep
-            //for (int d = 0; d < ilog2ceil(n); d++) {
-            //    kernWorkEfficientUpSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
-            //}
-
-            //setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
-
-            //// Down-Sweep
-            //for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
-            //    kernWorkEfficientDownSweep << <fullBlocksPerGrid, BLOCK_SIZE >> > (paddedN, n, d, dev_temp);
-            //}
-
-            for (int d = 0; d < ilog2ceil(n); d++) {
-                // Calculate how many threads are actually needed for this pass
-                int numActiveThreads = paddedN / (1 << (d + 1));
-                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
-                dim3 blockDim(BLOCK_SIZE);
-
-                kernUpSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
-                //cudaDeviceSynchronize();
-            }
-
-            setLastElementToZero << <1, 1 >> > (paddedN, dev_temp);
-
-            for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
-                int numActiveThreads = paddedN / (1 << (d + 1));
-                dim3 gridDim((numActiveThreads + BLOCK_SIZE - 1) / BLOCK_SIZE);
-                dim3 blockDim(BLOCK_SIZE);
-
-                kernDownSweep << <gridDim, blockDim >> > (paddedN, d, dev_temp);
-                //cudaDeviceSynchronize();
-            }
+            
+            scan_device(paddedN, dev_odata, dev_temp);
 
             timer().endGpuTimer();
 
-            cudaMemcpy(odata, dev_temp, n * sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(odata, dev_odata, n * sizeof(int), cudaMemcpyDeviceToHost);
 
             cudaFree(dev_temp);
+            cudaFree(dev_odata);
         }
 
         /**
@@ -232,6 +248,7 @@ namespace StreamCompaction {
             StreamCompaction::Common::kernMapToBoolean << <fullBlocksPerGrid, BLOCK_SIZE >> > (n, dev_flags, dev_idata);
 
 			//compute the scan of the temporary array
+            int paddedN = 1 << ilog2ceil(n);
             scan_device(n, dev_scanResult, dev_flags);
 
 			//compute the scatter
